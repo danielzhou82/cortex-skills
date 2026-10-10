@@ -38,9 +38,22 @@ CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 # ---------- ids ----------
 
+_last_ulid = 0   # previous id from the current time, as an int
+
+
 def ulid(ms: int | None = None) -> str:
-    ms = int(time.time() * 1000) if ms is None else ms
-    n = (ms << 80) | secrets.randbits(80)
+    """Ids for the current time increase strictly within one process (the ULID spec's
+    monotonic mode): within one millisecond, or if the clock steps back, the next id is
+    the previous plus one, so quick successive events keep their order. An explicit `ms`
+    gives a plain random id."""
+    global _last_ulid
+    if ms is not None:
+        n = (ms << 80) | secrets.randbits(80)
+    else:
+        n = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+        if n >> 80 <= _last_ulid >> 80:
+            n = _last_ulid + 1
+        _last_ulid = n
     return "".join(CROCKFORD[(n >> (5 * i)) & 31] for i in reversed(range(26)))
 
 
@@ -88,6 +101,10 @@ class Git:
             elif parts[0] == "D" and len(parts) == 2 and parts[1] == cur:
                 return None
         return cur if (self.repo / cur).exists() else None
+
+    def is_dirty(self, path: str) -> bool:
+        """Whether the working-tree file differs from HEAD (or is untracked)."""
+        return bool(self.run("status", "--porcelain", "--", path).strip())
 
     def commit_adding(self, relpath: str) -> str | None:
         out = self.run("log", "--diff-filter=A", "--format=%H", "--", relpath, check=False)
@@ -430,7 +447,8 @@ class Store:
             return None, Anchor("orphaned", "none")
         kind = a.target.get("text", "markdown")
         current = doc_text((self.repo / path).read_text("utf-8"), kind)
-        original = self.git.show(a.target["commit"], a.target["path"])
+        # a dirty target was annotated on uncommitted text; the commit holds a different version
+        original = None if a.target.get("dirty") else self.git.show(a.target["commit"], a.target["path"])
         if original is not None:
             original = doc_text(original, kind)
         return path, reanchor(a.target["selector"], current, original)
@@ -454,6 +472,8 @@ def cmd_create(st: Store, args) -> None:
                                         html_headings_at(headings, s) if headings is not None else None)}
     if kind == "html":
         target["text"] = "html"
+    if st.git.is_dirty(args.path):
+        target["dirty"] = True
     print(st.write_event(ann_id, "create", kind=args.kind, body=args.body, target=target))
 
 

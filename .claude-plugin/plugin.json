@@ -1,7 +1,7 @@
 {
   "name": "cortex",
   "description": "Skills for agents working on a Cortex knowledge base: process annotations left in the Cortex iOS app.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": { "name": "Daniel Zhou" },
   "repository": "https://github.com/danielzhou82/cortex-skills"
 }

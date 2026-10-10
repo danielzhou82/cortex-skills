@@ -1,0 +1,14 @@
+{
+  "name": "cortex-skills",
+  "description": "Agent skills for the Cortex iOS app's Git-backed knowledge base.",
+  "owner": {
+    "name": "Daniel Zhou"
+  },
+  "plugins": [
+    {
+      "name": "cortex",
+      "source": "./",
+      "description": "Process annotations left in the Cortex iOS app on Markdown / HTML documents in a Git-backed knowledge base."
+    }
+  ]
+}

@@ -22,9 +22,6 @@ from pathlib import Path
 
 ANN_DIR = ".cortex/annotations"
 CONTEXT_LEN = 32
-INACTIONABLE_KINDS = {"note", "highlight"}
-KINDS = ["question", "source-needed", "correction", "expand", "compress",
-         "decision", "action", "note", "highlight"]
 STATUS_BY_EVENT = {
     "create": "open",
     "claim": "in_progress",
@@ -369,7 +366,6 @@ class Annotation:
     id: str
     events: list[dict] = field(default_factory=list)
     status: str = "open"
-    kind: str = ""
     body: str = ""
     path: str = ""
     target: dict = field(default_factory=dict)
@@ -377,7 +373,7 @@ class Annotation:
 
     @property
     def actionable(self) -> bool:
-        return self.status == "open" and self.kind not in INACTIONABLE_KINDS
+        return self.status == "open"
 
 
 def derive(ann_id: str, events: list[dict]) -> Annotation:
@@ -386,10 +382,9 @@ def derive(ann_id: str, events: list[dict]) -> Annotation:
     for e in events:
         t = e["type"]
         if t == "create":
-            a.kind, a.body, a.target = e["kind"], e.get("body", ""), e["target"]
+            a.body, a.target = e.get("body", ""), e["target"]   # an old "kind" is ignored
             a.path = e["target"]["path"]
         elif t == "edit":
-            a.kind = e.get("kind", a.kind)
             a.body = e.get("body", a.body)
         elif t == "relocate":
             a.path = e["path"]
@@ -474,13 +469,13 @@ def cmd_create(st: Store, args) -> None:
         target["text"] = "html"
     if st.git.is_dirty(args.path):
         target["dirty"] = True
-    print(st.write_event(ann_id, "create", kind=args.kind, body=args.body, target=target))
+    print(st.write_event(ann_id, "create", body=args.body, target=target))
 
 
 def cmd_event(st: Store, args) -> None:
     a = st.find(args.id)
     print(st.write_event(a.id, args.type, body=args.body, outcome=args.outcome,
-                         kind=args.kind, path=args.path))
+                         path=args.path))
 
 
 def cmd_list(st: Store, args) -> None:
@@ -495,7 +490,7 @@ def cmd_list(st: Store, args) -> None:
         if args.actionable and anc.result == "orphaned":
             continue
         quote = a.target["selector"]["quote"]["exact"].replace("\n", " ")
-        print(f"{short_id(a.id)}  {a.status:<11} {a.kind:<13} {anc.result:<8} {path or a.path}")
+        print(f"{short_id(a.id)}  {a.status:<11} {anc.result:<8} {path or a.path}")
         print(f"          「{quote[:60]}」 {a.body[:60]}")
 
 
@@ -503,7 +498,7 @@ def cmd_show(st: Store, args) -> None:
     a = st.find(args.id)
     path, anc = st.anchor(a)
     print(json.dumps({
-        "id": a.id, "status": a.status, "kind": a.kind, "body": a.body,
+        "id": a.id, "status": a.status, "body": a.body,
         "path": path, "anchor": anc.__dict__,
         "events": a.events,
     }, ensure_ascii=False, indent=2))
@@ -518,8 +513,7 @@ def main() -> None:
     c = sub.add_parser("create")
     c.add_argument("path")
     c.add_argument("quote")
-    c.add_argument("--kind", choices=KINDS, default="note")
-    c.add_argument("--body", default="")
+    c.add_argument("--body", required=True, help="what the agent should do")
     c.add_argument("--occurrence", type=int)
 
     e = sub.add_parser("event")
@@ -528,7 +522,6 @@ def main() -> None:
                                     "resolve", "reopen", "withdraw", "relocate"])
     e.add_argument("--body")
     e.add_argument("--outcome", choices=["changed", "answered", "no_change"])
-    e.add_argument("--kind", choices=KINDS)
     e.add_argument("--path")
 
     ls = sub.add_parser("list")

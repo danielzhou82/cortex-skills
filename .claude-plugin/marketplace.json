@@ -8,7 +8,7 @@
     {
       "name": "cortex",
       "source": "./",
-      "description": "Process annotations left in the Cortex iOS app on Markdown / HTML documents in a Git-backed knowledge base."
+      "description": "Process comments left for the agent in the Cortex app on Markdown / HTML documents in a Git-backed knowledge base."
     }
   ]
 }

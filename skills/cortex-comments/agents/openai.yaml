@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cortex 评论处理"
+  short_description: "处理知识库文档上的 Cortex 评论：改正文或回答，再写 resolve / needs_input 事件"
+  default_prompt: "使用 $cortex-comments 处理我指定文档上的待处理评论。"

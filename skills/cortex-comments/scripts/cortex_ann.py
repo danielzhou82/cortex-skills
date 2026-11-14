@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Reference implementation of the Cortex annotation protocol v0.1.
+"""Reference implementation of the Cortex annotation and comment protocol v0.2.
+
+Comments are requests to the agent; this tool lists and answers them. Annotations are the
+person's own notes: the tool reads one only when a comment refers to it (`from`).
 
 Stdlib only; shells out to git.
 """
@@ -20,7 +23,9 @@ from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
-ANN_DIR = ".cortex/annotations"
+COMMENTS_DIR = ".cortex/comments"
+ANNOTATIONS_DIR = ".cortex/annotations"
+VERSION = 2
 CONTEXT_LEN = 32
 STATUS_BY_EVENT = {
     "create": "open",
@@ -58,9 +63,9 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def short_id(ann_id: str) -> str:
+def short_id(item_id: str) -> str:
     """Last 8 chars: the random part, unlike the timestamp-heavy prefix."""
-    return ann_id[-8:]
+    return item_id[-8:]
 
 
 # ---------- git ----------
@@ -362,7 +367,7 @@ def reanchor(selector: dict, current: str, original: str | None,
 # ---------- store ----------
 
 @dataclass
-class Annotation:
+class Comment:
     id: str
     events: list[dict] = field(default_factory=list)
     status: str = "open"
@@ -376,9 +381,9 @@ class Annotation:
         return self.status == "open"
 
 
-def derive(ann_id: str, events: list[dict]) -> Annotation:
+def derive(comment_id: str, events: list[dict]) -> Comment:
     events = sorted(events, key=lambda e: e["id"])
-    a = Annotation(ann_id, events)
+    a = Comment(comment_id, events)
     for e in events:
         t = e["type"]
         if t == "create":
@@ -388,7 +393,7 @@ def derive(ann_id: str, events: list[dict]) -> Annotation:
             a.body = e.get("body", a.body)
         elif t == "relocate":
             a.path = e["path"]
-        elif t == "comment" and a.status == "waiting":
+        elif t == "reply" and a.status == "waiting":
             a.status = "open"
         if t in STATUS_BY_EVENT:
             a.status = STATUS_BY_EVENT[t]
@@ -396,14 +401,25 @@ def derive(ann_id: str, events: list[dict]) -> Annotation:
     return a
 
 
+def annotation_body(events: list[dict]) -> tuple[str, bool]:
+    """(body, deleted) of an annotation: create, then edits, deleted by a delete event."""
+    body, deleted = "", False
+    for e in sorted(events, key=lambda e: e["id"]):
+        if e["type"] in ("create", "edit"):
+            body = e.get("body", body)
+        elif e["type"] == "delete":
+            deleted = True
+    return body, deleted
+
+
 class Store:
     def __init__(self, repo: Path, author: str):
         self.repo = repo
         self.git = Git(repo)
         self.author = author
-        self.root = repo / ANN_DIR
+        self.root = repo / COMMENTS_DIR
 
-    def load(self) -> list[Annotation]:
+    def load(self) -> list[Comment]:
         out = []
         if not self.root.exists():
             return out
@@ -414,29 +430,39 @@ class Store:
                     out.append(derive(d.name, evs))
         return out
 
-    def find(self, prefix: str) -> Annotation:
+    def find(self, prefix: str) -> Comment:
         key = prefix.upper()
         hits = [a for a in self.load() if a.id.startswith(key) or a.id.endswith(key)]
         if len(hits) != 1:
-            sys.exit(f"{len(hits)} annotations match {prefix!r} (prefix or suffix)")
+            sys.exit(f"{len(hits)} comments match {prefix!r} (prefix or suffix)")
         return hits[0]
 
-    def write_event(self, ann_id: str, type_: str, **fields) -> Path:
-        eid = ann_id if type_ == "create" else ulid()
-        ev = {"v": 1, "id": eid, "annotation": ann_id, "type": type_,
+    def source_annotation(self, c: Comment) -> dict | None:
+        """The annotation a comment was made from (`from` on its create event), the only one
+        the agent reads: {"id", "body", "deleted"}, or None."""
+        aid = next((e.get("from") for e in c.events if e["type"] == "create"), None)
+        d = self.repo / ANNOTATIONS_DIR / aid if aid else None
+        if d is None or not d.is_dir():
+            return None
+        body, deleted = annotation_body([json.loads(f.read_text("utf-8")) for f in d.glob("*.json")])
+        return {"id": aid, "body": body, "deleted": deleted}
+
+    def write_event(self, comment_id: str, type_: str, **fields) -> Path:
+        eid = comment_id if type_ == "create" else ulid()
+        ev = {"v": VERSION, "id": eid, "comment": comment_id, "type": type_,
               "at": now_iso(), "author": self.author}
         ev.update({k: v for k, v in fields.items() if v is not None})
-        path = self.root / ann_id / f"{eid}.json"
+        path = self.root / comment_id / f"{eid}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(ev, ensure_ascii=False, indent=2) + "\n", "utf-8")
         return path
 
-    def current_path(self, a: Annotation) -> str | None:
+    def current_path(self, a: Comment) -> str | None:
         if (self.repo / a.path).exists():
             return a.path
         return self.git.follow_rename(a.target["commit"], a.path)
 
-    def anchor(self, a: Annotation) -> tuple[str | None, Anchor]:
+    def anchor(self, a: Comment) -> tuple[str | None, Anchor]:
         path = self.current_path(a)
         if path is None:
             return None, Anchor("orphaned", "none")
@@ -461,7 +487,7 @@ def cmd_create(st: Store, args) -> None:
     if len(hits) > 1 and args.occurrence is None:
         sys.exit(f"quote occurs {len(hits)} times; pass --occurrence N (0-based)")
     s = hits[args.occurrence or 0]
-    ann_id = ulid()
+    comment_id = ulid()
     target = {"path": args.path, "commit": st.git.head(),
               "selector": make_selector(text, s, s + len(args.quote),
                                         html_headings_at(headings, s) if headings is not None else None)}
@@ -469,7 +495,7 @@ def cmd_create(st: Store, args) -> None:
         target["text"] = "html"
     if st.git.is_dirty(args.path):
         target["dirty"] = True
-    print(st.write_event(ann_id, "create", body=args.body, target=target))
+    print(st.write_event(comment_id, "create", body=args.body, target=target, **{"from": args.source}))
 
 
 def cmd_event(st: Store, args) -> None:
@@ -497,11 +523,12 @@ def cmd_list(st: Store, args) -> None:
 def cmd_show(st: Store, args) -> None:
     a = st.find(args.id)
     path, anc = st.anchor(a)
-    print(json.dumps({
-        "id": a.id, "status": a.status, "body": a.body,
-        "path": path, "anchor": anc.__dict__,
-        "events": a.events,
-    }, ensure_ascii=False, indent=2))
+    out = {"id": a.id, "status": a.status, "body": a.body,
+           "path": path, "anchor": anc.__dict__, "events": a.events}
+    src = st.source_annotation(a)
+    if src:
+        out["from"] = src
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
@@ -515,10 +542,11 @@ def main() -> None:
     c.add_argument("quote")
     c.add_argument("--body", required=True, help="what the agent should do")
     c.add_argument("--occurrence", type=int)
+    c.add_argument("--from", dest="source", help="id of the annotation this comment is made from")
 
     e = sub.add_parser("event")
     e.add_argument("id")
-    e.add_argument("type", choices=["comment", "edit", "claim", "needs_input",
+    e.add_argument("type", choices=["reply", "edit", "claim", "needs_input",
                                     "resolve", "reopen", "withdraw", "relocate"])
     e.add_argument("--body")
     e.add_argument("--outcome", choices=["changed", "answered", "no_change"])
@@ -527,7 +555,7 @@ def main() -> None:
     ls = sub.add_parser("list")
     ls.add_argument("--status", choices=["open", "in_progress", "waiting", "resolved", "withdrawn"])
     ls.add_argument("--actionable", action="store_true")
-    ls.add_argument("--path", help="only annotations on this document (current or original path)")
+    ls.add_argument("--path", help="only comments on this document (current or original path)")
 
     s = sub.add_parser("show")
     s.add_argument("id")
